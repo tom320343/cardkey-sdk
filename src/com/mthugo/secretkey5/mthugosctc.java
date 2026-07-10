@@ -67,63 +67,55 @@ public class mthugosctc {
     }
 
     private static long fetchBeijingTime() {
+        String[] timeUrls = {
+            "https://www.baidu.com",
+            "https://www.qq.com",
+            "https://time.is/t1/?0.0.1000.0.0P.-480.null.0.0.",
+            "https://www.taobao.com"
+        };
+        for (String urlStr : timeUrls) {
+            long result = tryFetchTime(urlStr);
+            if (result > 0) return result;
+        }
+        return -1;
+    }
+
+    private static long tryFetchTime(String urlStr) {
         HttpURLConnection conn = null;
-        BufferedReader reader = null;
         try {
-            URL url = new URL("https://time.is/China");
+            URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-
-            reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-            StringBuilder html = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                html.append(line);
-            }
-            String content = html.toString();
-
-            Pattern p = Pattern.compile("\"Beijing\",\"([^\"]+)\"");
-            Matcher m = p.matcher(content);
-            if (m.find()) {
-                String timeStr = m.group(1);
-                String[] parts = timeStr.split(":");
-                if (parts.length >= 2) {
-                    int hour = Integer.parseInt(parts[0]);
-                    int minute = Integer.parseInt(parts[1]);
-                    Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"));
-                    cal.set(Calendar.HOUR_OF_DAY, hour);
-                    cal.set(Calendar.MINUTE, minute);
-                    cal.set(Calendar.SECOND, 0);
-                    cal.set(Calendar.MILLISECOND, 0);
-                    return cal.getTimeInMillis();
+            conn.setRequestMethod("HEAD");
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            int code = conn.getResponseCode();
+            if (urlStr.contains("time.is/t1")) {
+                conn.disconnect();
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                String firstLine = reader.readLine();
+                reader.close();
+                if (firstLine != null && firstLine.matches("\\d{13}")) {
+                    long ts = Long.parseLong(firstLine);
+                    return ts + 8 * 3600000;
                 }
             }
-
-            Pattern p2 = Pattern.compile("(\\d{1,2}):(\\d{2})");
-            Matcher m2 = p2.matcher(content);
-            int foundCount = 0;
-            while (m2.find() && foundCount < 5) {
-                int hour = Integer.parseInt(m2.group(1));
-                int minute = Integer.parseInt(m2.group(2));
-                if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-                    Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"));
-                    cal.set(Calendar.HOUR_OF_DAY, hour);
-                    cal.set(Calendar.MINUTE, minute);
-                    cal.set(Calendar.SECOND, 0);
-                    cal.set(Calendar.MILLISECOND, 0);
-                    return cal.getTimeInMillis();
+            if (code == 200) {
+                String dateHeader = conn.getHeaderField("Date");
+                if (dateHeader != null) {
+                    SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
+                    sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+                    Date gmtDate = sdf.parse(dateHeader);
+                    return gmtDate.getTime() + 8 * 3600000;
                 }
-                foundCount++;
             }
         } catch (Exception e) {
-            Log.e("TimeCheck", "Failed to fetch Beijing time", e);
+            Log.e("TimeCheck", "Failed fetch from " + urlStr, e);
         } finally {
-            try {
-                if (reader != null) reader.close();
-                if (conn != null) conn.disconnect();
-            } catch (IOException ignored) {}
+            if (conn != null) conn.disconnect();
         }
         return -1;
     }
