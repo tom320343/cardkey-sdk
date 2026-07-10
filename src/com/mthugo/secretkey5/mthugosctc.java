@@ -11,6 +11,9 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -25,8 +28,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.ParseException;
@@ -156,10 +161,280 @@ public class mthugosctc {
         return deviceId;
     }
 
-    public static void initializeDevice(Activity activity) {
+    private static boolean checkXposed() {
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedBridge");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedHelpers");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedInit");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedInstaller");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("com.saurik.substrate.MS$2");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            ClassLoader.getSystemClassLoader().loadClass("com.saurik.substrate.MS$3");
+            return true;
+        } catch (ClassNotFoundException ignored) {}
+        try {
+            throw new Exception("xposed");
+        } catch (Exception e) {
+            for (StackTraceElement element : e.getStackTrace()) {
+                if (element.getClassName().contains("de.robv.android.xposed")) {
+                    return true;
+                }
+            }
+        }
+        try {
+            String classPath = System.getProperty("java.class.path");
+            if (classPath != null && classPath.contains("XposedBridge")) {
+                return true;
+            }
+        } catch (Exception ignored) {}
+        try {
+            String[] checkPaths = {
+                "/system/lib/libxposed_art.so",
+                "/system/lib64/libxposed_art.so",
+                "/system/framework/XposedBridge.jar",
+                "/data/data/de.robv.android.xposed.installer",
+                "/data/data/com.saurik.substrate",
+                "/data/local/tmp/xposed"
+            };
+            for (String path : checkPaths) {
+                if (new File(path).exists()) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {}
+        try {
+            String[] xposedApps = {
+                "de.robv.android.xposed.installer",
+                "com.saurik.substrate",
+                "com.abangfadli.xposed",
+                "com.whenair.lua"
+            };
+            for (String pkg : xposedApps) {
+                try {
+                    Class<?> c = ClassLoader.getSystemClassLoader().loadClass("android.app.Application");
+                    // Check if any xposed PKG is installed via reflection
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static boolean checkVirtualMachine() {
+        String manufacturer = Build.MANUFACTURER.toLowerCase();
+        String model = Build.MODEL.toLowerCase();
+        String product = Build.PRODUCT.toLowerCase();
+        String hardware = Build.HARDWARE.toLowerCase();
+        String board = Build.BOARD.toLowerCase();
+        String brand = Build.BRAND.toLowerCase();
+        String fingerprint = Build.FINGERPRINT.toLowerCase();
+
+        if (fingerprint.contains("generic") || fingerprint.contains("vbox") ||
+            fingerprint.contains("test-keys") || fingerprint.contains("android_sdk") ||
+            fingerprint.contains("emulator") || fingerprint.contains("unknown")) {
+            return true;
+        }
+        if (manufacturer.contains("genymotion") || manufacturer.contains("virtualbox") ||
+            manufacturer.contains("vmware") || manufacturer.contains("parallels") ||
+            manufacturer.contains("qemu") || brand.contains("generic")) {
+            return true;
+        }
+        if (model.contains("sdk") || model.contains("emulator") || model.contains("virtual") ||
+            model.contains("vbox") || model.contains("qemu") || model.contains("android")) {
+            return true;
+        }
+        if (product.contains("sdk") || product.contains("emulator") || product.contains("vbox") ||
+            product.contains("generic") || product.contains("simulator")) {
+            return true;
+        }
+        if (hardware.contains("goldfish") || hardware.contains("ranchu") ||
+            hardware.contains("vbox") || hardware.contains("qemu") ||
+            hardware.contains("virtual") || hardware.contains("android_emu")) {
+            return true;
+        }
+        if (board.contains("goldfish") || board.contains("ranchu") || board.contains("vbox") ||
+            board.contains("qemu") || board.contains("generic")) {
+            return true;
+        }
+        try {
+            String[] props = {"ro.product.cpu.abi", "ro.product.cpu.abi2", "ro.kernel.qemu",
+                "ro.hardware", "ro.build.tags"};
+            for (String prop : props) {
+                try {
+                    Class<?> sc = Class.forName("android.os.SystemProperties");
+                    Method method = sc.getMethod("get", String.class);
+                    String value = (String) method.invoke(null, prop);
+                    if (value != null && value.toLowerCase().contains("qemu")) return true;
+                    if (prop.equals("ro.kernel.qemu") && "1".equals(value)) return true;
+                    if (prop.equals("ro.build.tags") && value != null && value.contains("test-keys")) return true;
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        try {
+            String[] vmFiles = {
+                "/dev/qemu_pipe", "/dev/socket/qemud", "/system/bin/qemu-props",
+                "/dev/socket/genyd", "/dev/socket/baseband_genyd",
+                "/proc/tty/drivers", "/proc/cpuinfo"
+            };
+            for (String path : vmFiles) {
+                File f = new File(path);
+                if (f.exists()) {
+                    if (path.equals("/proc/tty/drivers")) {
+                        java.io.FileInputStream fis = null;
+                        try {
+                            fis = new java.io.FileInputStream(f);
+                            byte[] buf = new byte[1024];
+                            int len = fis.read(buf);
+                            String content = new String(buf, 0, len).toLowerCase();
+                            if (content.contains("goldfish")) return true;
+                        } catch (Exception ignored) {} finally {
+                            try { if (fis != null) fis.close(); } catch (Exception ignored) {}
+                        }
+                    } else if (path.equals("/proc/cpuinfo")) {
+                        java.io.FileInputStream fis = null;
+                        try {
+                            fis = new java.io.FileInputStream(f);
+                            byte[] buf = new byte[1024];
+                            int len = fis.read(buf);
+                            String content = new String(buf, 0, len).toLowerCase();
+                            if (content.contains("qemu") || content.contains("virtual")) return true;
+                        } catch (Exception ignored) {} finally {
+                            try { if (fis != null) fis.close(); } catch (Exception ignored) {}
+                        }
+                    } else {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        try {
+            if ("00:11:22:33:44:55".equalsIgnoreCase(Build.getRadioVersion())) {
+                return true;
+            }
+            String serial = Build.SERIAL.toLowerCase();
+            if (serial.contains("emulator") || serial.contains("unknown") || serial.contains("android")) {
+                return true;
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (Build.getRadioVersion() == null || Build.getRadioVersion().isEmpty() ||
+                "000000000000000".equals(Build.getRadioVersion())) {
+                return true;
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (Build.USER != null && Build.USER.toLowerCase().contains("android-build")) {
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static String detectEnvironment() {
+        boolean xposed = checkXposed();
+        boolean vm = checkVirtualMachine();
+        if (xposed && vm) return "检测到Xposed模块及虚拟机环境";
+        if (xposed) return "检测到Xposed模块";
+        if (vm) return "检测到虚拟机环境";
+        return null;
+    }
+
+    public static void initializeDevice(final Activity activity) {
+        final String detection = detectEnvironment();
+        if (detection != null) {
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    final Dialog alertDialog = new Dialog(activity);
+                    alertDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                    alertDialog.setCancelable(false);
+                    alertDialog.setCanceledOnTouchOutside(false);
+
+                    LinearLayout layout = new LinearLayout(activity);
+                    layout.setOrientation(LinearLayout.VERTICAL);
+                    layout.setPadding(dpToPx(activity, 24), dpToPx(activity, 24),
+                            dpToPx(activity, 24), dpToPx(activity, 20));
+
+                    GradientDrawable bg = new GradientDrawable();
+                    bg.setShape(GradientDrawable.RECTANGLE);
+                    bg.setCornerRadius(dpToPx(activity, 12));
+                    bg.setColor(Color.WHITE);
+                    bg.setStroke(dpToPx(activity, 2), Color.parseColor("#E0E0E0"));
+                    layout.setBackground(bg);
+
+                    TextView title = new TextView(activity);
+                    title.setText("安全警告");
+                    title.setTextSize(20);
+                    title.setTextColor(Color.parseColor("#FF4D4F"));
+                    title.setGravity(Gravity.CENTER);
+                    layout.addView(title);
+
+                    TextView msg = new TextView(activity);
+                    msg.setText(detection + "，应用无法运行。");
+                    msg.setTextSize(15);
+                    msg.setTextColor(Color.parseColor("#333333"));
+                    msg.setGravity(Gravity.CENTER);
+                    msg.setPadding(0, dpToPx(activity, 12), 0, dpToPx(activity, 16));
+                    layout.addView(msg);
+
+                    Button exitBtn = new Button(activity);
+                    exitBtn.setText("退出");
+                    exitBtn.setTextSize(15);
+                    exitBtn.setTextColor(Color.WHITE);
+                    GradientDrawable btnBg = new GradientDrawable();
+                    btnBg.setShape(GradientDrawable.RECTANGLE);
+                    btnBg.setCornerRadius(dpToPx(activity, 8));
+                    btnBg.setColor(Color.parseColor("#FF4D4F"));
+                    exitBtn.setBackground(btnBg);
+                    exitBtn.setPadding(0, dpToPx(activity, 10), 0, dpToPx(activity, 10));
+                    exitBtn.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            alertDialog.dismiss();
+                            activity.finishAffinity();
+                            System.exit(0);
+                        }
+                    });
+                    layout.addView(exitBtn);
+
+                    alertDialog.setContentView(layout);
+
+                    Window window = alertDialog.getWindow();
+                    if (window != null) {
+                        DisplayMetrics metrics = new DisplayMetrics();
+                        activity.getWindowManager().getDefaultDisplay().getMetrics(metrics);
+                        WindowManager.LayoutParams params = window.getAttributes();
+                        params.width = (int) (metrics.widthPixels * 0.85);
+                        params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                        window.setAttributes(params);
+                        window.setBackgroundDrawableResource(android.R.color.transparent);
+                    }
+                    alertDialog.show();
+                }
+            });
+            return;
+        }
         SharedPreferences prefs = activity.getSharedPreferences(getPrefsName(), 0);
         String deviceId = getOrCreateDeviceId(prefs);
         new CheckExpiryTask(activity, prefs, deviceId).execute();
+    }
+
+    private static int dpToPx(Activity activity, int dp) {
+        float density = activity.getResources().getDisplayMetrics().density;
+        return (int) (dp * density + 0.5f);
     }
 
     private static class CheckExpiryTask extends AsyncTask<Void, Void, Boolean> {
