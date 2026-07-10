@@ -7,8 +7,14 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
@@ -34,6 +40,7 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -299,17 +306,106 @@ public class mthugosctc {
         return false;
     }
 
-    private static String detectEnvironment() {
+    private static boolean checkVPN(Activity activity) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            if (Build.VERSION.SDK_INT >= 23) {
+                android.net.Network[] networks = cm.getAllNetworks();
+                if (networks != null) {
+                    for (android.net.Network network : networks) {
+                        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        try {
+            String[] vpnIfaces = {"tun0", "tun", "ppp0", "tap0"};
+            for (String iface : vpnIfaces) {
+                File f = new File("/sys/class/net/" + iface);
+                if (f.exists()) return true;
+            }
+        } catch (Exception ignored) {}
+        try {
+            java.io.FileInputStream fis = new java.io.FileInputStream(new File("/proc/net/if_inet6"));
+            byte[] buf = new byte[4096];
+            int len = fis.read(buf);
+            fis.close();
+            String content = new String(buf, 0, len).toLowerCase(Locale.US);
+            if (content.contains("tun0") || content.contains("tun") ||
+                content.contains("ppp0") || content.contains("tap0")) {
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static String getExpectedSignature() {
+        return "填写你的签名SHA256";
+    }
+
+    private static String checkSignature(Activity activity) {
+        try {
+            PackageManager pm = activity.getPackageManager();
+            String pkgName = activity.getPackageName();
+            PackageInfo pkgInfo;
+            if (Build.VERSION.SDK_INT >= 28) {
+                pkgInfo = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNING_CERTIFICATES);
+                if (pkgInfo.signingInfo != null) {
+                    Signature[] signatures = pkgInfo.signingInfo.getApkContentsSigners();
+                    return verifySignatures(signatures, pkgName, pm);
+                }
+            }
+            pkgInfo = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNATURES);
+            return verifySignatures(pkgInfo.signatures, pkgName, pm);
+        } catch (Exception e) {
+            Log.e("Signature", "Failed to verify", e);
+        }
+        return null;
+    }
+
+    private static String verifySignatures(Signature[] signatures, String pkgName, PackageManager pm) {
+        if (signatures == null || signatures.length == 0) return "签名校验失败：未找到签名";
+        String expected = getExpectedSignature();
+        if (expected == null || expected.isEmpty() || expected.contains("填写你的签名")) {
+            return null;
+        }
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(signatures[0].toByteArray());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            String currentSig = sb.toString().toLowerCase(Locale.US);
+            String expectedLower = expected.toLowerCase(Locale.US).replaceAll("[^0-9a-f]", "");
+            if (currentSig.equals(expectedLower)) return null;
+            Log.e("Signature", "Expected: " + expectedLower);
+            Log.e("Signature", "Current:  " + currentSig);
+        } catch (Exception e) {
+            Log.e("Signature", "Digest error", e);
+        }
+        return "签名校验失败：应用签名不匹配";
+    }
+
+    private static String detectEnvironment(Activity activity) {
         boolean xposed = checkXposed();
         boolean vm = checkVirtualMachine();
+        boolean vpn = checkVPN(activity);
+        String sigError = checkSignature(activity);
+        if (sigError != null) return sigError;
         if (xposed && vm) return "检测到Xposed模块及虚拟机环境";
         if (xposed) return "检测到Xposed模块";
         if (vm) return "检测到虚拟机环境";
+        if (vpn) return "检测到VPN环境，即将退出";
         return null;
     }
 
     public static void initializeDevice(final Activity activity) {
-        final String detection = detectEnvironment();
+        final String detection = detectEnvironment(activity);
         if (detection != null) {
             activity.runOnUiThread(new Runnable() {
                 @Override
