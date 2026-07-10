@@ -226,26 +226,20 @@ public class mthugosctc {
     }
 
     private static boolean checkVirtualMachine() {
-        String manufacturer = Build.MANUFACTURER.toLowerCase();
-        String model = Build.MODEL.toLowerCase();
-        String product = Build.PRODUCT.toLowerCase();
-        String hardware = Build.HARDWARE.toLowerCase();
-        String board = Build.BOARD.toLowerCase();
-        String brand = Build.BRAND.toLowerCase();
-        String fingerprint = Build.FINGERPRINT.toLowerCase();
+        String manufacturer = Build.MANUFACTURER.toLowerCase(Locale.US);
+        String model = Build.MODEL.toLowerCase(Locale.US);
+        String product = Build.PRODUCT.toLowerCase(Locale.US);
+        String hardware = Build.HARDWARE.toLowerCase(Locale.US);
+        String board = Build.BOARD.toLowerCase(Locale.US);
+        String brand = Build.BRAND.toLowerCase(Locale.US);
+        String fingerprint = Build.FINGERPRINT.toLowerCase(Locale.US);
 
         if (fingerprint.contains("generic") || fingerprint.contains("vbox") ||
-            fingerprint.contains("test-keys") || fingerprint.contains("android_sdk") ||
-            fingerprint.contains("emulator") || fingerprint.contains("unknown")) {
+            fingerprint.contains("android_sdk") || fingerprint.contains("emulator")) {
             return true;
         }
-        if (manufacturer.contains("genymotion") || manufacturer.contains("virtualbox") ||
-            manufacturer.contains("vmware") || manufacturer.contains("parallels") ||
+        if (manufacturer.contains("genymotion") ||
             manufacturer.contains("qemu") || brand.contains("generic")) {
-            return true;
-        }
-        if (model.contains("sdk") || model.contains("emulator") || model.contains("virtual") ||
-            model.contains("vbox") || model.contains("qemu") || model.contains("android")) {
             return true;
         }
         if (product.contains("sdk") || product.contains("emulator") || product.contains("vbox") ||
@@ -253,8 +247,7 @@ public class mthugosctc {
             return true;
         }
         if (hardware.contains("goldfish") || hardware.contains("ranchu") ||
-            hardware.contains("vbox") || hardware.contains("qemu") ||
-            hardware.contains("virtual") || hardware.contains("android_emu")) {
+            hardware.contains("vbox") || hardware.contains("qemu")) {
             return true;
         }
         if (board.contains("goldfish") || board.contains("ranchu") || board.contains("vbox") ||
@@ -262,16 +255,13 @@ public class mthugosctc {
             return true;
         }
         try {
-            String[] props = {"ro.product.cpu.abi", "ro.product.cpu.abi2", "ro.kernel.qemu",
-                "ro.hardware", "ro.build.tags"};
+            String[] props = {"ro.kernel.qemu"};
             for (String prop : props) {
                 try {
                     Class<?> sc = Class.forName("android.os.SystemProperties");
                     Method method = sc.getMethod("get", String.class);
                     String value = (String) method.invoke(null, prop);
-                    if (value != null && value.toLowerCase().contains("qemu")) return true;
-                    if (prop.equals("ro.kernel.qemu") && "1".equals(value)) return true;
-                    if (prop.equals("ro.build.tags") && value != null && value.contains("test-keys")) return true;
+                    if ("1".equals(value)) return true;
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
@@ -279,7 +269,7 @@ public class mthugosctc {
             String[] vmFiles = {
                 "/dev/qemu_pipe", "/dev/socket/qemud", "/system/bin/qemu-props",
                 "/dev/socket/genyd", "/dev/socket/baseband_genyd",
-                "/proc/tty/drivers", "/proc/cpuinfo"
+                "/proc/tty/drivers"
             };
             for (String path : vmFiles) {
                 File f = new File(path);
@@ -290,19 +280,8 @@ public class mthugosctc {
                             fis = new java.io.FileInputStream(f);
                             byte[] buf = new byte[1024];
                             int len = fis.read(buf);
-                            String content = new String(buf, 0, len).toLowerCase();
+                            String content = new String(buf, 0, len).toLowerCase(Locale.US);
                             if (content.contains("goldfish")) return true;
-                        } catch (Exception ignored) {} finally {
-                            try { if (fis != null) fis.close(); } catch (Exception ignored) {}
-                        }
-                    } else if (path.equals("/proc/cpuinfo")) {
-                        java.io.FileInputStream fis = null;
-                        try {
-                            fis = new java.io.FileInputStream(f);
-                            byte[] buf = new byte[1024];
-                            int len = fis.read(buf);
-                            String content = new String(buf, 0, len).toLowerCase();
-                            if (content.contains("qemu") || content.contains("virtual")) return true;
                         } catch (Exception ignored) {} finally {
                             try { if (fis != null) fis.close(); } catch (Exception ignored) {}
                         }
@@ -314,21 +293,6 @@ public class mthugosctc {
         } catch (Exception ignored) {}
         try {
             if ("00:11:22:33:44:55".equalsIgnoreCase(Build.getRadioVersion())) {
-                return true;
-            }
-            String serial = Build.SERIAL.toLowerCase();
-            if (serial.contains("emulator") || serial.contains("unknown") || serial.contains("android")) {
-                return true;
-            }
-        } catch (Exception ignored) {}
-        try {
-            if (Build.getRadioVersion() == null || Build.getRadioVersion().isEmpty() ||
-                "000000000000000".equals(Build.getRadioVersion())) {
-                return true;
-            }
-        } catch (Exception ignored) {}
-        try {
-            if (Build.USER != null && Build.USER.toLowerCase().contains("android-build")) {
                 return true;
             }
         } catch (Exception ignored) {}
