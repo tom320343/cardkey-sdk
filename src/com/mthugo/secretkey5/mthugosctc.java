@@ -388,7 +388,7 @@ public class mthugosctc {
         } catch (Exception e) {
             Log.e("Signature", "Digest error", e);
         }
-        return "签名校验失败：应用签名不匹配";
+        return "签名被更改，应用退出";
     }
 
     private static String detectEnvironment(Activity activity) {
