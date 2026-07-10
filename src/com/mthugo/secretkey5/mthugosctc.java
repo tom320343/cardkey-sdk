@@ -30,9 +30,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Random;
+import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,6 +60,86 @@ public class mthugosctc {
         return "填写你的QQ链接地址";
     }
 
+    private static long fetchBeijingTime() {
+        HttpURLConnection conn = null;
+        BufferedReader reader = null;
+        try {
+            URL url = new URL("https://time.is/China");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(10000);
+
+            reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            StringBuilder html = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                html.append(line);
+            }
+            String content = html.toString();
+
+            Pattern p = Pattern.compile("\"Beijing\",\"([^\"]+)\"");
+            Matcher m = p.matcher(content);
+            if (m.find()) {
+                String timeStr = m.group(1);
+                String[] parts = timeStr.split(":");
+                if (parts.length >= 2) {
+                    int hour = Integer.parseInt(parts[0]);
+                    int minute = Integer.parseInt(parts[1]);
+                    Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"));
+                    cal.set(Calendar.HOUR_OF_DAY, hour);
+                    cal.set(Calendar.MINUTE, minute);
+                    cal.set(Calendar.SECOND, 0);
+                    cal.set(Calendar.MILLISECOND, 0);
+                    return cal.getTimeInMillis();
+                }
+            }
+
+            Pattern p2 = Pattern.compile("(\\d{1,2}):(\\d{2})");
+            Matcher m2 = p2.matcher(content);
+            int foundCount = 0;
+            while (m2.find() && foundCount < 5) {
+                int hour = Integer.parseInt(m2.group(1));
+                int minute = Integer.parseInt(m2.group(2));
+                if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+                    Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"));
+                    cal.set(Calendar.HOUR_OF_DAY, hour);
+                    cal.set(Calendar.MINUTE, minute);
+                    cal.set(Calendar.SECOND, 0);
+                    cal.set(Calendar.MILLISECOND, 0);
+                    return cal.getTimeInMillis();
+                }
+                foundCount++;
+            }
+        } catch (Exception e) {
+            Log.e("TimeCheck", "Failed to fetch Beijing time", e);
+        } finally {
+            try {
+                if (reader != null) reader.close();
+                if (conn != null) conn.disconnect();
+            } catch (IOException ignored) {}
+        }
+        return -1;
+    }
+
+    private static boolean checkExpiryWithBeijingTime(String expiryStr, long beijingTimeMs) {
+        if (expiryStr == null || expiryStr.isEmpty()) {
+            return false;
+        }
+        try {
+            String[] parts = expiryStr.split("-");
+            if (parts.length != 2) {
+                return false;
+            }
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmm", Locale.getDefault());
+            Date expiryDate = sdf.parse(parts[1]);
+            long expiryTime = expiryDate.getTime();
+            return beijingTimeMs > 0 && beijingTimeMs < expiryTime;
+        } catch (ParseException e) {
+            return false;
+        }
+    }
+
     private static String generateRandomId() {
         Random random = new Random();
         int id = random.nextInt(90000000) + 10000000;
@@ -73,32 +155,13 @@ public class mthugosctc {
         return deviceId;
     }
 
-    private static boolean isValidExpiryDate(String expiryStr) {
-        if (expiryStr == null || expiryStr.isEmpty()) {
-            return false;
-        }
-        try {
-            String[] parts = expiryStr.split("-");
-            if (parts.length != 2) {
-                return false;
-            }
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmm", Locale.getDefault());
-            Date expiryDate = sdf.parse(parts[1]);
-            long currentTime = System.currentTimeMillis();
-            long expiryTime = expiryDate.getTime();
-            return currentTime < expiryTime;
-        } catch (ParseException e) {
-            return false;
-        }
-    }
-
     public static void initializeDevice(Activity activity) {
         SharedPreferences prefs = activity.getSharedPreferences(getPrefsName(), 0);
         String deviceId = getOrCreateDeviceId(prefs);
         new CheckExpiryTask(activity, prefs, deviceId).execute();
     }
 
-    private static class CheckExpiryTask extends AsyncTask<Void, Void, String> {
+    private static class CheckExpiryTask extends AsyncTask<Void, Void, Boolean> {
         private final Activity activity;
         private final SharedPreferences prefs;
         private final String deviceId;
@@ -110,9 +173,10 @@ public class mthugosctc {
         }
 
         @Override
-        protected String doInBackground(Void... voids) {
+        protected Boolean doInBackground(Void... voids) {
             HttpURLConnection conn = null;
             BufferedReader reader = null;
+            String fullExpiry = null;
             try {
                 URL url = new URL(getValidationUrl());
                 conn = (HttpURLConnection) url.openConnection();
@@ -127,8 +191,8 @@ public class mthugosctc {
                     Matcher matcher = pattern.matcher(line);
                     if (matcher.find()) {
                         String expiryPart = matcher.group(1);
-                        String fullExpiry = deviceId + "-" + expiryPart;
-                        return fullExpiry;
+                        fullExpiry = deviceId + "-" + expiryPart;
+                        break;
                     }
                 }
             } catch (IOException e) {
@@ -141,18 +205,22 @@ public class mthugosctc {
                     Log.e("CheckExpiry", "Close Error", e);
                 }
             }
-            return null;
+
+            if (fullExpiry != null) {
+                prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
+                long beijingTime = fetchBeijingTime();
+                if (beijingTime > 0 && checkExpiryWithBeijingTime(fullExpiry, beijingTime)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         @Override
-        protected void onPostExecute(String expiry) {
-            if (expiry != null) {
-                prefs.edit().putString(getKeyExpiryDate(), expiry).apply();
-                if (isValidExpiryDate(expiry)) {
-                    return;
-                }
+        protected void onPostExecute(Boolean valid) {
+            if (!valid) {
+                new ActivationDialog(activity, prefs, deviceId).show();
             }
-            new ActivationDialog(activity, prefs, deviceId).show();
         }
     }
 
@@ -404,6 +472,7 @@ public class mthugosctc {
             protected Boolean doInBackground(Void... voids) {
                 HttpURLConnection conn = null;
                 BufferedReader reader = null;
+                String fullExpiry = null;
                 try {
                     URL url = new URL(getValidationUrl());
                     conn = (HttpURLConnection) url.openConnection();
@@ -418,12 +487,8 @@ public class mthugosctc {
                         Matcher matcher = pattern.matcher(line);
                         if (matcher.find()) {
                             String expiryPart = matcher.group(1);
-                            String fullExpiry = deviceId + "-" + expiryPart;
-
-                            if (isValidExpiryDate(fullExpiry)) {
-                                prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
-                                return true;
-                            }
+                            fullExpiry = deviceId + "-" + expiryPart;
+                            break;
                         }
                     }
                 } catch (IOException e) {
@@ -434,6 +499,14 @@ public class mthugosctc {
                         if (conn != null) conn.disconnect();
                     } catch (IOException e) {
                         Log.e("Activation", "Close Error", e);
+                    }
+                }
+
+                if (fullExpiry != null) {
+                    long beijingTime = fetchBeijingTime();
+                    if (beijingTime > 0 && checkExpiryWithBeijingTime(fullExpiry, beijingTime)) {
+                        prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
+                        return true;
                     }
                 }
                 return false;
