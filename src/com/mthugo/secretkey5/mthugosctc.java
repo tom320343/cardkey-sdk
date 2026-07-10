@@ -11,6 +11,7 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Handler;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
@@ -229,6 +230,10 @@ public class mthugosctc {
         private final SharedPreferences prefs;
         private final String deviceId;
         private Dialog dialog;
+        private Handler autoCheckHandler;
+        private Runnable autoCheckRunnable;
+        private TextView statusText;
+        private boolean dismissed = false;
 
         ActivationDialog(Activity context, SharedPreferences prefs, String deviceId) {
             this.context = context;
@@ -241,6 +246,88 @@ public class mthugosctc {
             setupMainLayout();
             configureDialogWindow();
             dialog.show();
+            startAutoCheck();
+        }
+
+        private void dismiss() {
+            if (!dismissed && dialog != null && dialog.isShowing()) {
+                dismissed = true;
+                stopAutoCheck();
+                dialog.dismiss();
+            }
+        }
+
+        private void startAutoCheck() {
+            autoCheckHandler = new Handler();
+            autoCheckRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (dismissed) return;
+                    new AsyncTask<Void, Void, Boolean>() {
+                        @Override
+                        protected Boolean doInBackground(Void... v) {
+                            String saved = prefs.getString(getKeyExpiryDate(), null);
+                            if (saved != null) {
+                                long beijingTime = fetchBeijingTime();
+                                return beijingTime > 0 && checkExpiryWithBeijingTime(saved, beijingTime);
+                            }
+                            HttpURLConnection conn = null;
+                            BufferedReader reader = null;
+                            try {
+                                URL url = new URL(getValidationUrl());
+                                conn = (HttpURLConnection) url.openConnection();
+                                conn.setRequestMethod("GET");
+                                conn.setConnectTimeout(8000);
+                                conn.setReadTimeout(8000);
+                                reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                                String line;
+                                Pattern pattern = Pattern.compile(deviceId + "-(\\d{12})");
+                                while ((line = reader.readLine()) != null) {
+                                    Matcher matcher = pattern.matcher(line);
+                                    if (matcher.find()) {
+                                        String exp = deviceId + "-" + matcher.group(1);
+                                        prefs.edit().putString(getKeyExpiryDate(), exp).apply();
+                                        long bt = fetchBeijingTime();
+                                        return bt > 0 && checkExpiryWithBeijingTime(exp, bt);
+                                    }
+                                }
+                            } catch (Exception ignored) {
+                            } finally {
+                                try { if (reader != null) reader.close(); } catch (Exception ignored) {}
+                                try { if (conn != null) conn.disconnect(); } catch (Exception ignored) {}
+                            }
+                            return false;
+                        }
+
+                        @Override
+                        protected void onPostExecute(Boolean valid) {
+                            if (valid) {
+                                if (statusText != null) {
+                                    statusText.setText("验证通过，激活成功");
+                                    statusText.setTextColor(Color.parseColor("#4CAF50"));
+                                }
+                                new Handler().postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        dismiss();
+                                    }
+                                }, 800);
+                            } else {
+                                if (autoCheckHandler != null && !dismissed) {
+                                    autoCheckHandler.postDelayed(autoCheckRunnable, 30000);
+                                }
+                            }
+                        }
+                    }.execute();
+                }
+            };
+            autoCheckHandler.postDelayed(autoCheckRunnable, 30000);
+        }
+
+        private void stopAutoCheck() {
+            if (autoCheckHandler != null && autoCheckRunnable != null) {
+                autoCheckHandler.removeCallbacks(autoCheckRunnable);
+            }
         }
 
         private void createDialog() {
@@ -303,74 +390,91 @@ public class mthugosctc {
         private void setupMainLayout() {
             LinearLayout mainLayout = new LinearLayout(context);
             mainLayout.setOrientation(LinearLayout.VERTICAL);
-            mainLayout.setBackground(createRoundRectNoStroke("#EBFFF6", 20));
-            mainLayout.setPadding(dpToPx(15), dpToPx(12), dpToPx(15), dpToPx(15));
+            mainLayout.setBackground(createRoundRectWithStroke("#FFFFFF", 16, 2, "#E0E0E0"));
+            mainLayout.setPadding(dpToPx(20), dpToPx(18), dpToPx(20), dpToPx(16));
 
             TextView titleText = new TextView(context);
-            titleText.setText("激活验证");
-            titleText.setTextSize(20);
-            titleText.setTextColor(Color.parseColor("#333333"));
+            titleText.setText("软件激活");
+            titleText.setTextSize(22);
+            titleText.setTextColor(Color.parseColor("#1A1A1A"));
             titleText.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            titleParams.setMargins(0, 0, 0, dpToPx(8));
+            titleParams.setMargins(0, 0, 0, dpToPx(6));
             mainLayout.addView(titleText, titleParams);
 
             TextView subtitleText = new TextView(context);
-            subtitleText.setText("但行好事，莫问前程");
+            subtitleText.setText("请复制设备ID发送给管理员进行激活");
             subtitleText.setTextSize(14);
-            subtitleText.setTextColor(Color.parseColor("#666666"));
-            subtitleText.setPadding(dpToPx(12), 0, 0, dpToPx(4));
+            subtitleText.setTextColor(Color.parseColor("#888888"));
+            subtitleText.setGravity(Gravity.CENTER);
+            subtitleText.setPadding(0, 0, 0, dpToPx(10));
             mainLayout.addView(subtitleText);
 
-            LinearLayout deviceRow = new LinearLayout(context);
-            deviceRow.setOrientation(LinearLayout.HORIZONTAL);
-            deviceRow.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout cardLayout = new LinearLayout(context);
+            cardLayout.setOrientation(LinearLayout.HORIZONTAL);
+            cardLayout.setGravity(Gravity.CENTER_VERTICAL);
+            cardLayout.setBackground(createRoundRectNoStroke("#F5F7FA", 12));
+            cardLayout.setPadding(dpToPx(14), dpToPx(12), dpToPx(10), dpToPx(12));
 
-            TextView deviceIdText = new TextView(context);
-            deviceIdText.setText("设备ID：" + deviceId);
-            deviceIdText.setTextSize(16);
-            deviceIdText.setTextColor(Color.parseColor("#2196F3"));
-            deviceIdText.setBackground(createRoundRectWithStroke("#484848", 12, 1, "#BBDEFB"));
-            deviceIdText.setPadding(dpToPx(12), dpToPx(8), dpToPx(12), dpToPx(8));
+            TextView deviceLabel = new TextView(context);
+            deviceLabel.setText("设备ID");
+            deviceLabel.setTextSize(13);
+            deviceLabel.setTextColor(Color.parseColor("#999999"));
+            cardLayout.addView(deviceLabel);
 
-            LinearLayout.LayoutParams deviceIdParams = new LinearLayout.LayoutParams(
+            TextView deviceValue = new TextView(context);
+            deviceValue.setText(deviceId);
+            deviceValue.setTextSize(18);
+            deviceValue.setTextColor(Color.parseColor("#333333"));
+            LinearLayout.LayoutParams deviceValueParams = new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            deviceIdParams.setMargins(0, 0, dpToPx(10), 0);
-            deviceRow.addView(deviceIdText, deviceIdParams);
+            deviceValueParams.setMargins(dpToPx(8), 0, dpToPx(8), 0);
+            cardLayout.addView(deviceValue, deviceValueParams);
 
             Button copyBtn = new Button(context);
             copyBtn.setText("复制");
-            copyBtn.setTextSize(14);
+            copyBtn.setTextSize(13);
             copyBtn.setTextColor(Color.WHITE);
             copyBtn.setGravity(Gravity.CENTER);
-            copyBtn.setBackground(createRoundRectNoStroke("#90A4AE", 8));
-            copyBtn.setPadding(dpToPx(15), 0, dpToPx(15), 0);
+            copyBtn.setBackground(createRoundRectNoStroke("#1890FF", 8));
+            copyBtn.setPadding(dpToPx(14), dpToPx(5), dpToPx(14), dpToPx(5));
             copyBtn.setMinHeight(0);
             copyBtn.setLayoutParams(new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             copyBtn.setOnClickListener(new CopyClickListener(this));
-            deviceRow.addView(copyBtn);
-            mainLayout.addView(deviceRow);
+            cardLayout.addView(copyBtn);
+
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardParams.setMargins(0, 0, 0, dpToPx(8));
+            mainLayout.addView(cardLayout, cardParams);
+
+            statusText = new TextView(context);
+            statusText.setText("等待激活...");
+            statusText.setTextSize(12);
+            statusText.setTextColor(Color.parseColor("#FF9800"));
+            statusText.setGravity(Gravity.CENTER);
+            statusText.setPadding(0, 0, 0, dpToPx(12));
+            mainLayout.addView(statusText);
 
             LinearLayout buttonRow = new LinearLayout(context);
             buttonRow.setOrientation(LinearLayout.HORIZONTAL);
             buttonRow.setGravity(Gravity.CENTER);
-            buttonRow.setPadding(0, dpToPx(15), 0, 0);
 
             LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            btnParams.setMargins(dpToPx(10), 0, dpToPx(10), 0);
+            btnParams.setMargins(dpToPx(6), 0, dpToPx(6), 0);
 
-            Button qqBtn = createButton("QQ", "#2196F3", 8);
+            Button qqBtn = createButton("联系客服", "#1890FF", 8);
             qqBtn.setOnClickListener(new QQClickListener(this));
             buttonRow.addView(qqBtn, btnParams);
 
-            Button activateBtn = createButton("激活", "#4CAF50", 8);
+            Button activateBtn = createButton("手动验证", "#52C41A", 8);
             activateBtn.setOnClickListener(new ActivateClickListener(this));
             buttonRow.addView(activateBtn, btnParams);
 
-            Button exitBtn = createButton("退出", "#F44336", 8);
+            Button exitBtn = createButton("退出", "#FF4D4F", 8);
             exitBtn.setOnClickListener(new ExitClickListener(this));
             buttonRow.addView(exitBtn, btnParams);
 
@@ -437,7 +541,11 @@ public class mthugosctc {
 
             @Override
             public void onClick(View v) {
-                new ActivationTask(dialog.getContext(), dialog.getPrefs(), dialog.getDeviceId(), dialog.getDialog()).execute();
+                if (dialog.statusText != null) {
+                    dialog.statusText.setText("正在验证...");
+                    dialog.statusText.setTextColor(Color.parseColor("#1890FF"));
+                }
+                new ActivationTask(dialog).execute();
             }
         }
 
@@ -456,16 +564,10 @@ public class mthugosctc {
         }
 
         private static class ActivationTask extends AsyncTask<Void, Void, Boolean> {
-            private final Activity context;
-            private final SharedPreferences prefs;
-            private final String deviceId;
-            private final Dialog dialog;
+            private final ActivationDialog activationDialog;
 
-            ActivationTask(Activity context, SharedPreferences prefs, String deviceId, Dialog dialog) {
-                this.context = context;
-                this.prefs = prefs;
-                this.deviceId = deviceId;
-                this.dialog = dialog;
+            ActivationTask(ActivationDialog dialog) {
+                this.activationDialog = dialog;
             }
 
             @Override
@@ -482,12 +584,12 @@ public class mthugosctc {
 
                     reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                     String line;
-                    Pattern pattern = Pattern.compile(deviceId + "-(\\d{12})");
+                    Pattern pattern = Pattern.compile(activationDialog.deviceId + "-(\\d{12})");
                     while ((line = reader.readLine()) != null) {
                         Matcher matcher = pattern.matcher(line);
                         if (matcher.find()) {
                             String expiryPart = matcher.group(1);
-                            fullExpiry = deviceId + "-" + expiryPart;
+                            fullExpiry = activationDialog.deviceId + "-" + expiryPart;
                             break;
                         }
                     }
@@ -505,7 +607,8 @@ public class mthugosctc {
                 if (fullExpiry != null) {
                     long beijingTime = fetchBeijingTime();
                     if (beijingTime > 0 && checkExpiryWithBeijingTime(fullExpiry, beijingTime)) {
-                        prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
+                        activationDialog.prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
+                        new CheckExpiryTask(activationDialog.context, activationDialog.prefs, activationDialog.deviceId).execute();
                         return true;
                     }
                 }
@@ -515,11 +618,22 @@ public class mthugosctc {
             @Override
             protected void onPostExecute(Boolean success) {
                 if (success) {
-                    new CheckExpiryTask(context, prefs, deviceId).execute();
-                    dialog.dismiss();
-                    Toast.makeText(context, "激活成功", Toast.LENGTH_SHORT).show();
+                    activationDialog.stopAutoCheck();
+                    if (activationDialog.statusText != null) {
+                        activationDialog.statusText.setText("验证通过，激活成功");
+                        activationDialog.statusText.setTextColor(Color.parseColor("#52C41A"));
+                    }
+                    new Handler().postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            activationDialog.dismiss();
+                        }
+                    }, 800);
                 } else {
-                    Toast.makeText(context, "激活失败：请QQ联系获取激活权限", Toast.LENGTH_LONG).show();
+                    if (activationDialog.statusText != null) {
+                        activationDialog.statusText.setText("激活失败，请QQ联系管理员");
+                        activationDialog.statusText.setTextColor(Color.parseColor("#FF4D4F"));
+                    }
                 }
             }
         }
