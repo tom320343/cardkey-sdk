@@ -7,19 +7,10 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.Signature;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.AsyncTask;
-import android.os.Build;
-import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -33,512 +24,178 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.security.MessageDigest;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.Locale;
-import java.util.Random;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
 public class mthugosctc {
 
-    private static String getPrefsName() {
-        return "device_prefs";
+    static {
+        try {
+            System.loadLibrary("mthugo");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e("mthugo", "Failed to load native library", e);
+        }
     }
 
-    private static String getKeyDeviceId() {
-        return "device_id";
-    }
+    public static long cachedBeijingTime;
 
-    private static String getKeyExpiryDate() {
-        return "expiry_date";
-    }
+    // ===== Native methods =====
+    private static native String nativeDetectEnvironment(Activity activity);
+    private static native String nativeGenerateDeviceId();
+    private static native boolean nativeFetchBeijingTime();
+    private static native boolean nativeCheckExpiry(String expiryStr, long beijingTime);
+    private static native String nativeFetchValidation(String deviceId);
+
+    // ===== Placeholder strings (replace via MT Manager) =====
+    static String _validationUrl = "填写你的QQ收藏地址";
+    static String _contactUrl = "填写你的QQ链接地址";
+    static String _expectedSignature = "填写你的签名SHA256";
 
     private static String getValidationUrl() {
-        return "填写你的QQ收藏地址";
+        return _validationUrl;
     }
 
     private static String getContactUrl() {
-        return "填写你的QQ链接地址";
+        return _contactUrl;
     }
 
-    private static long fetchBeijingTime() {
-        String[] timeUrls = {
-            "https://www.baidu.com",
-            "https://www.qq.com",
-            "https://time.is/t1/?0.0.1000.0.0P.-480.null.0.0.",
-            "https://www.taobao.com"
-        };
-        for (String urlStr : timeUrls) {
-            long result = tryFetchTime(urlStr);
-            if (result > 0) return result;
-        }
-        return -1;
+    private static String getExpectedSignature() {
+        return _expectedSignature;
     }
 
-    private static long tryFetchTime(String urlStr) {
-        HttpURLConnection conn = null;
+    // ===== Public API =====
+    public static void initializeDevice(final Activity activity) {
+        if (_validationUrl == null || _contactUrl == null || _expectedSignature == null) return;
+
         try {
-            URL url = new URL(urlStr);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("HEAD");
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            int code = conn.getResponseCode();
-            if (urlStr.contains("time.is/t1")) {
-                conn.disconnect();
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                String firstLine = reader.readLine();
-                reader.close();
-                if (firstLine != null && firstLine.matches("\\d{13}")) {
-                    long ts = Long.parseLong(firstLine);
-                    return ts + 8 * 3600000;
-                }
-            }
-            if (code == 200) {
-                String dateHeader = conn.getHeaderField("Date");
-                if (dateHeader != null) {
-                    SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
-                    sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
-                    Date gmtDate = sdf.parse(dateHeader);
-                    return gmtDate.getTime() + 8 * 3600000;
-                }
+            String detection = nativeDetectEnvironment(activity);
+            if (detection != null) {
+                showBlockDialog(activity, detection);
+                return;
             }
         } catch (Exception e) {
-            Log.e("TimeCheck", "Failed fetch from " + urlStr, e);
-        } finally {
-            if (conn != null) conn.disconnect();
+            Log.e("mthugo", "native detection failed", e);
         }
-        return -1;
+
+        final SharedPreferences prefs = activity.getSharedPreferences("device_prefs", 0);
+        final String deviceId = getOrCreateDeviceId(prefs);
+        new CheckExpiryTask(activity, prefs, deviceId).execute();
     }
 
-    private static boolean checkExpiryWithBeijingTime(String expiryStr, long beijingTimeMs) {
-        if (expiryStr == null || expiryStr.isEmpty()) {
-            return false;
-        }
-        try {
-            String[] parts = expiryStr.split("-");
-            if (parts.length != 2) {
-                return false;
-            }
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmm", Locale.getDefault());
-            Date expiryDate = sdf.parse(parts[1]);
-            long expiryTime = expiryDate.getTime();
-            return beijingTimeMs > 0 && beijingTimeMs < expiryTime;
-        } catch (ParseException e) {
-            return false;
-        }
-    }
-
-    private static String generateRandomId() {
-        Random random = new Random();
-        int id = random.nextInt(90000000) + 10000000;
-        return String.valueOf(id);
-    }
-
+    // ===== Helper methods =====
     private static String getOrCreateDeviceId(SharedPreferences prefs) {
-        String deviceId = prefs.getString(getKeyDeviceId(), null);
+        String deviceId = prefs.getString("device_id", null);
         if (deviceId == null || deviceId.isEmpty()) {
-            deviceId = generateRandomId();
-            prefs.edit().putString(getKeyDeviceId(), deviceId).apply();
+            try {
+                deviceId = nativeGenerateDeviceId();
+            } catch (Exception e) {
+                deviceId = String.valueOf(10000000 + (int)(Math.random() * 90000000));
+            }
+            prefs.edit().putString("device_id", deviceId).apply();
         }
         return deviceId;
     }
 
-    private static boolean checkXposed() {
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedBridge");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedHelpers");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedInit");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("de.robv.android.xposed.XposedInstaller");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("com.saurik.substrate.MS$2");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            ClassLoader.getSystemClassLoader().loadClass("com.saurik.substrate.MS$3");
-            return true;
-        } catch (ClassNotFoundException ignored) {}
-        try {
-            throw new Exception("xposed");
-        } catch (Exception e) {
-            for (StackTraceElement element : e.getStackTrace()) {
-                if (element.getClassName().contains("de.robv.android.xposed")) {
-                    return true;
-                }
-            }
-        }
-        try {
-            String classPath = System.getProperty("java.class.path");
-            if (classPath != null && classPath.contains("XposedBridge")) {
-                return true;
-            }
-        } catch (Exception ignored) {}
-        try {
-            String[] checkPaths = {
-                "/system/lib/libxposed_art.so",
-                "/system/lib64/libxposed_art.so",
-                "/system/framework/XposedBridge.jar",
-                "/data/data/de.robv.android.xposed.installer",
-                "/data/data/com.saurik.substrate",
-                "/data/local/tmp/xposed"
-            };
-            for (String path : checkPaths) {
-                if (new File(path).exists()) {
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {}
-        try {
-            String[] xposedApps = {
-                "de.robv.android.xposed.installer",
-                "com.saurik.substrate",
-                "com.abangfadli.xposed",
-                "com.whenair.lua"
-            };
-            for (String pkg : xposedApps) {
-                try {
-                    Class<?> c = ClassLoader.getSystemClassLoader().loadClass("android.app.Application");
-                    // Check if any xposed PKG is installed via reflection
-                } catch (Exception ignored) {}
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
+    // ===== Blocking dialog (Xposed/VM/VPN/Signature) =====
+    private static void showBlockDialog(final Activity activity, final String message) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final Dialog dialog = new Dialog(activity);
+                dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                dialog.setCancelable(false);
+                dialog.setCanceledOnTouchOutside(false);
 
-    private static boolean checkVirtualMachine() {
-        String manufacturer = Build.MANUFACTURER.toLowerCase(Locale.US);
-        String model = Build.MODEL.toLowerCase(Locale.US);
-        String product = Build.PRODUCT.toLowerCase(Locale.US);
-        String hardware = Build.HARDWARE.toLowerCase(Locale.US);
-        String board = Build.BOARD.toLowerCase(Locale.US);
-        String brand = Build.BRAND.toLowerCase(Locale.US);
-        String fingerprint = Build.FINGERPRINT.toLowerCase(Locale.US);
+                LinearLayout layout = new LinearLayout(activity);
+                layout.setOrientation(LinearLayout.VERTICAL);
+                layout.setPadding(dp(activity, 24), dp(activity, 24),
+                        dp(activity, 24), dp(activity, 20));
 
-        if (fingerprint.contains("generic") || fingerprint.contains("vbox") ||
-            fingerprint.contains("android_sdk") || fingerprint.contains("emulator")) {
-            return true;
-        }
-        if (manufacturer.contains("genymotion") ||
-            manufacturer.contains("qemu") || brand.contains("generic")) {
-            return true;
-        }
-        if (product.contains("sdk") || product.contains("emulator") || product.contains("vbox") ||
-            product.contains("generic") || product.contains("simulator")) {
-            return true;
-        }
-        if (hardware.contains("goldfish") || hardware.contains("ranchu") ||
-            hardware.contains("vbox") || hardware.contains("qemu")) {
-            return true;
-        }
-        if (board.contains("goldfish") || board.contains("ranchu") || board.contains("vbox") ||
-            board.contains("qemu") || board.contains("generic")) {
-            return true;
-        }
-        try {
-            String[] props = {"ro.kernel.qemu"};
-            for (String prop : props) {
-                try {
-                    Class<?> sc = Class.forName("android.os.SystemProperties");
-                    Method method = sc.getMethod("get", String.class);
-                    String value = (String) method.invoke(null, prop);
-                    if ("1".equals(value)) return true;
-                } catch (Exception ignored) {}
-            }
-        } catch (Exception ignored) {}
-        try {
-            String[] vmFiles = {
-                "/dev/qemu_pipe", "/dev/socket/qemud", "/system/bin/qemu-props",
-                "/dev/socket/genyd", "/dev/socket/baseband_genyd",
-                "/proc/tty/drivers"
-            };
-            for (String path : vmFiles) {
-                File f = new File(path);
-                if (f.exists()) {
-                    if (path.equals("/proc/tty/drivers")) {
-                        java.io.FileInputStream fis = null;
-                        try {
-                            fis = new java.io.FileInputStream(f);
-                            byte[] buf = new byte[1024];
-                            int len = fis.read(buf);
-                            String content = new String(buf, 0, len).toLowerCase(Locale.US);
-                            if (content.contains("goldfish")) return true;
-                        } catch (Exception ignored) {} finally {
-                            try { if (fis != null) fis.close(); } catch (Exception ignored) {}
-                        }
-                    } else {
-                        return true;
+                GradientDrawable bg = new GradientDrawable();
+                bg.setShape(GradientDrawable.RECTANGLE);
+                bg.setCornerRadius(dp(activity, 12));
+                bg.setColor(Color.WHITE);
+                bg.setStroke(dp(activity, 2), Color.parseColor("#E0E0E0"));
+                layout.setBackground(bg);
+
+                TextView title = new TextView(activity);
+                title.setText("安全警告");
+                title.setTextSize(20);
+                title.setTextColor(Color.parseColor("#FF4D4F"));
+                title.setGravity(Gravity.CENTER);
+                layout.addView(title);
+
+                TextView msg = new TextView(activity);
+                msg.setText(message + "，应用无法运行。");
+                msg.setTextSize(15);
+                msg.setTextColor(Color.parseColor("#333333"));
+                msg.setGravity(Gravity.CENTER);
+                msg.setPadding(0, dp(activity, 12), 0, dp(activity, 16));
+                layout.addView(msg);
+
+                Button exitBtn = new Button(activity);
+                exitBtn.setText("退出");
+                exitBtn.setTextSize(15);
+                exitBtn.setTextColor(Color.WHITE);
+                GradientDrawable btnBg = new GradientDrawable();
+                btnBg.setShape(GradientDrawable.RECTANGLE);
+                btnBg.setCornerRadius(dp(activity, 8));
+                btnBg.setColor(Color.parseColor("#FF4D4F"));
+                exitBtn.setBackground(btnBg);
+                exitBtn.setPadding(0, dp(activity, 10), 0, dp(activity, 10));
+                exitBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        dialog.dismiss();
+                        activity.finishAffinity();
+                        System.exit(0);
                     }
+                });
+                layout.addView(exitBtn);
+
+                dialog.setContentView(layout);
+                Window window = dialog.getWindow();
+                if (window != null) {
+                    DisplayMetrics metrics = new DisplayMetrics();
+                    activity.getWindowManager().getDefaultDisplay().getMetrics(metrics);
+                    WindowManager.LayoutParams params = window.getAttributes();
+                    params.width = (int) (metrics.widthPixels * 0.85);
+                    params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    window.setAttributes(params);
+                    window.setBackgroundDrawableResource(android.R.color.transparent);
                 }
+                dialog.show();
             }
-        } catch (Exception ignored) {}
-        try {
-            if ("00:11:22:33:44:55".equalsIgnoreCase(Build.getRadioVersion())) {
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
+        });
     }
 
-    private static boolean checkVPN(Activity activity) {
-        try {
-            ConnectivityManager cm = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) return false;
-            if (Build.VERSION.SDK_INT >= 23) {
-                android.net.Network[] networks = cm.getAllNetworks();
-                if (networks != null) {
-                    for (android.net.Network network : networks) {
-                        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-        try {
-            String[] vpnIfaces = {"tun0", "tun", "ppp0", "tap0"};
-            for (String iface : vpnIfaces) {
-                File f = new File("/sys/class/net/" + iface);
-                if (f.exists()) return true;
-            }
-        } catch (Exception ignored) {}
-        try {
-            java.io.FileInputStream fis = new java.io.FileInputStream(new File("/proc/net/if_inet6"));
-            byte[] buf = new byte[4096];
-            int len = fis.read(buf);
-            fis.close();
-            String content = new String(buf, 0, len).toLowerCase(Locale.US);
-            if (content.contains("tun0") || content.contains("tun") ||
-                content.contains("ppp0") || content.contains("tap0")) {
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
+    private static int dp(Activity activity, int dp) {
+        return (int) (dp * activity.getResources().getDisplayMetrics().density + 0.5f);
     }
 
-    private static String getExpectedSignature() {
-        return "填写你的签名SHA256";
-    }
-
-    private static String checkSignature(Activity activity) {
-        try {
-            PackageManager pm = activity.getPackageManager();
-            String pkgName = activity.getPackageName();
-            PackageInfo pkgInfo;
-            if (Build.VERSION.SDK_INT >= 28) {
-                pkgInfo = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNING_CERTIFICATES);
-                if (pkgInfo.signingInfo != null) {
-                    Signature[] signatures = pkgInfo.signingInfo.getApkContentsSigners();
-                    return verifySignatures(signatures, pkgName, pm);
-                }
-            }
-            pkgInfo = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNATURES);
-            return verifySignatures(pkgInfo.signatures, pkgName, pm);
-        } catch (Exception e) {
-            Log.e("Signature", "Failed to verify", e);
-        }
-        return null;
-    }
-
-    private static String verifySignatures(Signature[] signatures, String pkgName, PackageManager pm) {
-        if (signatures == null || signatures.length == 0) return "签名校验失败：未找到签名";
-        String expected = getExpectedSignature();
-        if (expected == null || expected.isEmpty() || expected.contains("填写你的签名")) {
-            return null;
-        }
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(signatures[0].toByteArray());
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            String currentSig = sb.toString().toLowerCase(Locale.US);
-            String expectedLower = expected.toLowerCase(Locale.US).replaceAll("[^0-9a-f]", "");
-            if (currentSig.equals(expectedLower)) return null;
-            Log.e("Signature", "Expected: " + expectedLower);
-            Log.e("Signature", "Current:  " + currentSig);
-        } catch (Exception e) {
-            Log.e("Signature", "Digest error", e);
-        }
-        return "签名被更改，应用退出";
-    }
-
-    private static String detectEnvironment(Activity activity) {
-        boolean xposed = checkXposed();
-        boolean vm = checkVirtualMachine();
-        boolean vpn = checkVPN(activity);
-        String sigError = checkSignature(activity);
-        if (sigError != null) return sigError;
-        if (xposed && vm) return "检测到Xposed模块及虚拟机环境";
-        if (xposed) return "检测到Xposed模块";
-        if (vm) return "检测到虚拟机环境";
-        if (vpn) return "检测到VPN环境，即将退出";
-        return null;
-    }
-
-    public static void initializeDevice(final Activity activity) {
-        final String detection = detectEnvironment(activity);
-        if (detection != null) {
-            activity.runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    final Dialog alertDialog = new Dialog(activity);
-                    alertDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-                    alertDialog.setCancelable(false);
-                    alertDialog.setCanceledOnTouchOutside(false);
-
-                    LinearLayout layout = new LinearLayout(activity);
-                    layout.setOrientation(LinearLayout.VERTICAL);
-                    layout.setPadding(dpToPx(activity, 24), dpToPx(activity, 24),
-                            dpToPx(activity, 24), dpToPx(activity, 20));
-
-                    GradientDrawable bg = new GradientDrawable();
-                    bg.setShape(GradientDrawable.RECTANGLE);
-                    bg.setCornerRadius(dpToPx(activity, 12));
-                    bg.setColor(Color.WHITE);
-                    bg.setStroke(dpToPx(activity, 2), Color.parseColor("#E0E0E0"));
-                    layout.setBackground(bg);
-
-                    TextView title = new TextView(activity);
-                    title.setText("安全警告");
-                    title.setTextSize(20);
-                    title.setTextColor(Color.parseColor("#FF4D4F"));
-                    title.setGravity(Gravity.CENTER);
-                    layout.addView(title);
-
-                    TextView msg = new TextView(activity);
-                    msg.setText(detection + "，应用无法运行。");
-                    msg.setTextSize(15);
-                    msg.setTextColor(Color.parseColor("#333333"));
-                    msg.setGravity(Gravity.CENTER);
-                    msg.setPadding(0, dpToPx(activity, 12), 0, dpToPx(activity, 16));
-                    layout.addView(msg);
-
-                    Button exitBtn = new Button(activity);
-                    exitBtn.setText("退出");
-                    exitBtn.setTextSize(15);
-                    exitBtn.setTextColor(Color.WHITE);
-                    GradientDrawable btnBg = new GradientDrawable();
-                    btnBg.setShape(GradientDrawable.RECTANGLE);
-                    btnBg.setCornerRadius(dpToPx(activity, 8));
-                    btnBg.setColor(Color.parseColor("#FF4D4F"));
-                    exitBtn.setBackground(btnBg);
-                    exitBtn.setPadding(0, dpToPx(activity, 10), 0, dpToPx(activity, 10));
-                    exitBtn.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            alertDialog.dismiss();
-                            activity.finishAffinity();
-                            System.exit(0);
-                        }
-                    });
-                    layout.addView(exitBtn);
-
-                    alertDialog.setContentView(layout);
-
-                    Window window = alertDialog.getWindow();
-                    if (window != null) {
-                        DisplayMetrics metrics = new DisplayMetrics();
-                        activity.getWindowManager().getDefaultDisplay().getMetrics(metrics);
-                        WindowManager.LayoutParams params = window.getAttributes();
-                        params.width = (int) (metrics.widthPixels * 0.85);
-                        params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                        window.setAttributes(params);
-                        window.setBackgroundDrawableResource(android.R.color.transparent);
-                    }
-                    alertDialog.show();
-                }
-            });
-            return;
-        }
-        SharedPreferences prefs = activity.getSharedPreferences(getPrefsName(), 0);
-        String deviceId = getOrCreateDeviceId(prefs);
-        new CheckExpiryTask(activity, prefs, deviceId).execute();
-    }
-
-    private static int dpToPx(Activity activity, int dp) {
-        float density = activity.getResources().getDisplayMetrics().density;
-        return (int) (dp * density + 0.5f);
-    }
-
+    // ===== Check expiry task =====
     private static class CheckExpiryTask extends AsyncTask<Void, Void, Boolean> {
         private final Activity activity;
         private final SharedPreferences prefs;
         private final String deviceId;
 
-        CheckExpiryTask(Activity activity, SharedPreferences prefs, String deviceId) {
-            this.activity = activity;
-            this.prefs = prefs;
-            this.deviceId = deviceId;
+        CheckExpiryTask(Activity a, SharedPreferences p, String d) {
+            this.activity = a; this.prefs = p; this.deviceId = d;
         }
 
         @Override
-        protected Boolean doInBackground(Void... voids) {
-            HttpURLConnection conn = null;
-            BufferedReader reader = null;
+        protected Boolean doInBackground(Void... v) {
             String fullExpiry = null;
             try {
-                URL url = new URL(getValidationUrl());
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(8000);
-
-                reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                String line;
-                Pattern pattern = Pattern.compile(deviceId + "-(\\d{12})");
-                while ((line = reader.readLine()) != null) {
-                    Matcher matcher = pattern.matcher(line);
-                    if (matcher.find()) {
-                        String expiryPart = matcher.group(1);
-                        fullExpiry = deviceId + "-" + expiryPart;
-                        break;
-                    }
-                }
-            } catch (IOException e) {
-                Log.e("CheckExpiry", "Network Error", e);
-            } finally {
-                try {
-                    if (reader != null) reader.close();
-                    if (conn != null) conn.disconnect();
-                } catch (IOException e) {
-                    Log.e("CheckExpiry", "Close Error", e);
-                }
+                fullExpiry = nativeFetchValidation(deviceId);
+            } catch (Exception e) {
+                Log.e("mthugo", "native fetch failed", e);
             }
-
             if (fullExpiry != null) {
-                prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
-                long beijingTime = fetchBeijingTime();
-                if (beijingTime > 0 && checkExpiryWithBeijingTime(fullExpiry, beijingTime)) {
-                    return true;
+                prefs.edit().putString("expiry_date", fullExpiry).apply();
+                try {
+                    if (nativeFetchBeijingTime()) {
+                        if (nativeCheckExpiry(fullExpiry, cachedBeijingTime)) return true;
+                    }
+                } catch (Exception e) {
+                    Log.e("mthugo", "native time check failed", e);
                 }
             }
             return false;
@@ -546,12 +203,11 @@ public class mthugosctc {
 
         @Override
         protected void onPostExecute(Boolean valid) {
-            if (!valid) {
-                new ActivationDialog(activity, prefs, deviceId).show();
-            }
+            if (!valid) new ActivationDialog(activity, prefs, deviceId).show();
         }
     }
 
+    // ===== Activation dialog =====
     private static class ActivationDialog {
         private final Activity context;
         private final SharedPreferences prefs;
@@ -560,12 +216,10 @@ public class mthugosctc {
         private Handler autoCheckHandler;
         private Runnable autoCheckRunnable;
         private TextView statusText;
-        private boolean dismissed = false;
+        private boolean dismissed;
 
-        ActivationDialog(Activity context, SharedPreferences prefs, String deviceId) {
-            this.context = context;
-            this.prefs = prefs;
-            this.deviceId = deviceId;
+        ActivationDialog(Activity c, SharedPreferences p, String d) {
+            this.context = c; this.prefs = p; this.deviceId = d;
         }
 
         void show() {
@@ -593,35 +247,26 @@ public class mthugosctc {
                     new AsyncTask<Void, Void, Boolean>() {
                         @Override
                         protected Boolean doInBackground(Void... v) {
-                            String saved = prefs.getString(getKeyExpiryDate(), null);
+                            String saved = prefs.getString("expiry_date", null);
                             if (saved != null) {
-                                long beijingTime = fetchBeijingTime();
-                                return beijingTime > 0 && checkExpiryWithBeijingTime(saved, beijingTime);
-                            }
-                            HttpURLConnection conn = null;
-                            BufferedReader reader = null;
-                            try {
-                                URL url = new URL(getValidationUrl());
-                                conn = (HttpURLConnection) url.openConnection();
-                                conn.setRequestMethod("GET");
-                                conn.setConnectTimeout(8000);
-                                conn.setReadTimeout(8000);
-                                reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                                String line;
-                                Pattern pattern = Pattern.compile(deviceId + "-(\\d{12})");
-                                while ((line = reader.readLine()) != null) {
-                                    Matcher matcher = pattern.matcher(line);
-                                    if (matcher.find()) {
-                                        String exp = deviceId + "-" + matcher.group(1);
-                                        prefs.edit().putString(getKeyExpiryDate(), exp).apply();
-                                        long bt = fetchBeijingTime();
-                                        return bt > 0 && checkExpiryWithBeijingTime(exp, bt);
+                                try {
+                                    if (nativeFetchBeijingTime()) {
+                                        return nativeCheckExpiry(saved, cachedBeijingTime);
                                     }
-                                }
-                            } catch (Exception ignored) {
-                            } finally {
-                                try { if (reader != null) reader.close(); } catch (Exception ignored) {}
-                                try { if (conn != null) conn.disconnect(); } catch (Exception ignored) {}
+                                } catch (Exception e) {}
+                                return false;
+                            }
+                            String exp;
+                            try {
+                                exp = nativeFetchValidation(deviceId);
+                            } catch (Exception e) { return false; }
+                            if (exp != null) {
+                                prefs.edit().putString("expiry_date", exp).apply();
+                                try {
+                                    if (nativeFetchBeijingTime()) {
+                                        return nativeCheckExpiry(exp, cachedBeijingTime);
+                                    }
+                                } catch (Exception e) {}
                             }
                             return false;
                         }
@@ -635,9 +280,7 @@ public class mthugosctc {
                                 }
                                 new Handler().postDelayed(new Runnable() {
                                     @Override
-                                    public void run() {
-                                        dismiss();
-                                    }
+                                    public void run() { dismiss(); }
                                 }, 800);
                             } else {
                                 if (autoCheckHandler != null && !dismissed) {
@@ -664,302 +307,202 @@ public class mthugosctc {
             dialog.setCanceledOnTouchOutside(false);
         }
 
-        private int dpToPx(int dp) {
-            float density = context.getResources().getDisplayMetrics().density;
-            return (int) (dp * density + 0.5f);
-        }
-
-        private GradientDrawable createRoundRectNoStroke(String colorHex, int radiusDp) {
-            GradientDrawable drawable = new GradientDrawable();
-            drawable.setShape(GradientDrawable.RECTANGLE);
-            drawable.setCornerRadius(dpToPx(radiusDp));
-            drawable.setColor(Color.parseColor(colorHex));
-            return drawable;
-        }
-
-        private GradientDrawable createRoundRectWithStroke(String colorHex, int radiusDp, int strokeWidthDp, String strokeColorHex) {
-            GradientDrawable drawable = new GradientDrawable();
-            drawable.setShape(GradientDrawable.RECTANGLE);
-            drawable.setCornerRadius(dpToPx(radiusDp));
-            drawable.setColor(Color.parseColor(colorHex));
-            if (strokeWidthDp > 0) {
-                drawable.setStroke(dpToPx(strokeWidthDp), Color.parseColor(strokeColorHex));
+        private void configureDialogWindow() {
+            Window window = dialog.getWindow();
+            if (window != null) {
+                DisplayMetrics metrics = new DisplayMetrics();
+                context.getWindowManager().getDefaultDisplay().getMetrics(metrics);
+                WindowManager.LayoutParams params = window.getAttributes();
+                params.width = (int) (metrics.widthPixels * 0.9);
+                params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                params.y = -dp(context, 15);
+                window.setAttributes(params);
+                window.setBackgroundDrawableResource(android.R.color.transparent);
             }
-            return drawable;
         }
 
-        private Button createButton(String text, String colorHex, int radiusDp) {
-            Button button = new Button(context);
-            button.setText(text);
-            button.setTextSize(16);
-            button.setTextColor(Color.WHITE);
-            button.setBackground(createRoundRectNoStroke(colorHex, radiusDp));
-            button.setPadding(0, dpToPx(12), 0, dpToPx(12));
-            return button;
+        private GradientDrawable roundRect(String color, int radius, int strokeW, String strokeC) {
+            GradientDrawable d = new GradientDrawable();
+            d.setShape(GradientDrawable.RECTANGLE);
+            d.setCornerRadius(dp(context, radius));
+            d.setColor(Color.parseColor(color));
+            if (strokeW > 0) d.setStroke(dp(context, strokeW), Color.parseColor(strokeC));
+            return d;
         }
 
-        private Activity getContext() {
-            return context;
-        }
-
-        private SharedPreferences getPrefs() {
-            return prefs;
-        }
-
-        private String getDeviceId() {
-            return deviceId;
-        }
-
-        private Dialog getDialog() {
-            return dialog;
+        private Button createButton(String text, String colorHex, int radius) {
+            Button b = new Button(context);
+            b.setText(text); b.setTextSize(16); b.setTextColor(Color.WHITE);
+            b.setBackground(roundRect(colorHex, radius, 0, null));
+            b.setPadding(0, dp(context, 12), 0, dp(context, 12));
+            return b;
         }
 
         private void setupMainLayout() {
-            LinearLayout mainLayout = new LinearLayout(context);
-            mainLayout.setOrientation(LinearLayout.VERTICAL);
-            mainLayout.setBackground(createRoundRectWithStroke("#FFFFFF", 16, 2, "#E0E0E0"));
-            mainLayout.setPadding(dpToPx(20), dpToPx(18), dpToPx(20), dpToPx(16));
+            LinearLayout main = new LinearLayout(context);
+            main.setOrientation(LinearLayout.VERTICAL);
+            main.setBackground(roundRect("#FFFFFF", 16, 2, "#E0E0E0"));
+            main.setPadding(dp(context, 20), dp(context, 18), dp(context, 20), dp(context, 16));
 
-            TextView titleText = new TextView(context);
-            titleText.setText("软件激活");
-            titleText.setTextSize(22);
-            titleText.setTextColor(Color.parseColor("#1A1A1A"));
-            titleText.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+            TextView title = new TextView(context);
+            title.setText("软件激活");
+            title.setTextSize(22);
+            title.setTextColor(Color.parseColor("#1A1A1A"));
+            title.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            titleParams.setMargins(0, 0, 0, dpToPx(6));
-            mainLayout.addView(titleText, titleParams);
+            tp.setMargins(0, 0, 0, dp(context, 6));
+            main.addView(title, tp);
 
-            TextView subtitleText = new TextView(context);
-            subtitleText.setText("请复制设备ID发送给管理员进行激活");
-            subtitleText.setTextSize(14);
-            subtitleText.setTextColor(Color.parseColor("#888888"));
-            subtitleText.setGravity(Gravity.CENTER);
-            subtitleText.setPadding(0, 0, 0, dpToPx(10));
-            mainLayout.addView(subtitleText);
+            TextView sub = new TextView(context);
+            sub.setText("请复制设备ID发送给管理员进行激活");
+            sub.setTextSize(14);
+            sub.setTextColor(Color.parseColor("#888888"));
+            sub.setGravity(Gravity.CENTER);
+            sub.setPadding(0, 0, 0, dp(context, 10));
+            main.addView(sub);
 
-            LinearLayout cardLayout = new LinearLayout(context);
-            cardLayout.setOrientation(LinearLayout.HORIZONTAL);
-            cardLayout.setGravity(Gravity.CENTER_VERTICAL);
-            cardLayout.setBackground(createRoundRectNoStroke("#F5F7FA", 12));
-            cardLayout.setPadding(dpToPx(14), dpToPx(12), dpToPx(10), dpToPx(12));
+            LinearLayout card = new LinearLayout(context);
+            card.setOrientation(LinearLayout.HORIZONTAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setBackground(roundRect("#F5F7FA", 12, 0, null));
+            card.setPadding(dp(context, 14), dp(context, 12), dp(context, 10), dp(context, 12));
 
-            TextView deviceLabel = new TextView(context);
-            deviceLabel.setText("设备ID");
-            deviceLabel.setTextSize(13);
-            deviceLabel.setTextColor(Color.parseColor("#999999"));
-            cardLayout.addView(deviceLabel);
+            TextView label = new TextView(context);
+            label.setText("设备ID");
+            label.setTextSize(13);
+            label.setTextColor(Color.parseColor("#999999"));
+            card.addView(label);
 
-            TextView deviceValue = new TextView(context);
-            deviceValue.setText(deviceId);
-            deviceValue.setTextSize(18);
-            deviceValue.setTextColor(Color.parseColor("#333333"));
-            LinearLayout.LayoutParams deviceValueParams = new LinearLayout.LayoutParams(
+            TextView val = new TextView(context);
+            val.setText(deviceId);
+            val.setTextSize(18);
+            val.setTextColor(Color.parseColor("#333333"));
+            LinearLayout.LayoutParams vp = new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            deviceValueParams.setMargins(dpToPx(8), 0, dpToPx(8), 0);
-            cardLayout.addView(deviceValue, deviceValueParams);
+            vp.setMargins(dp(context, 8), 0, dp(context, 8), 0);
+            card.addView(val, vp);
 
-            Button copyBtn = new Button(context);
-            copyBtn.setText("复制");
-            copyBtn.setTextSize(13);
-            copyBtn.setTextColor(Color.WHITE);
-            copyBtn.setGravity(Gravity.CENTER);
-            copyBtn.setBackground(createRoundRectNoStroke("#1890FF", 8));
-            copyBtn.setPadding(dpToPx(14), dpToPx(5), dpToPx(14), dpToPx(5));
-            copyBtn.setMinHeight(0);
-            copyBtn.setLayoutParams(new LinearLayout.LayoutParams(
+            Button copy = new Button(context);
+            copy.setText("复制");
+            copy.setTextSize(13);
+            copy.setTextColor(Color.WHITE);
+            copy.setGravity(Gravity.CENTER);
+            copy.setBackground(roundRect("#1890FF", 8, 0, null));
+            copy.setPadding(dp(context, 14), dp(context, 5), dp(context, 14), dp(context, 5));
+            copy.setMinHeight(0);
+            copy.setLayoutParams(new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            copyBtn.setOnClickListener(new CopyClickListener(this));
-            cardLayout.addView(copyBtn);
+            copy.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("device_code", deviceId));
+                    Toast.makeText(context, "设备ID已复制", Toast.LENGTH_SHORT).show();
+                }
+            });
+            card.addView(copy);
 
-            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            cardParams.setMargins(0, 0, 0, dpToPx(8));
-            mainLayout.addView(cardLayout, cardParams);
+            cp.setMargins(0, 0, 0, dp(context, 8));
+            main.addView(card, cp);
 
             statusText = new TextView(context);
             statusText.setText("等待激活...");
             statusText.setTextSize(12);
             statusText.setTextColor(Color.parseColor("#FF9800"));
             statusText.setGravity(Gravity.CENTER);
-            statusText.setPadding(0, 0, 0, dpToPx(12));
-            mainLayout.addView(statusText);
+            statusText.setPadding(0, 0, 0, dp(context, 12));
+            main.addView(statusText);
 
-            LinearLayout buttonRow = new LinearLayout(context);
-            buttonRow.setOrientation(LinearLayout.HORIZONTAL);
-            buttonRow.setGravity(Gravity.CENTER);
+            LinearLayout btns = new LinearLayout(context);
+            btns.setOrientation(LinearLayout.HORIZONTAL);
+            btns.setGravity(Gravity.CENTER);
 
-            LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            btnParams.setMargins(dpToPx(6), 0, dpToPx(6), 0);
+            bp.setMargins(dp(context, 6), 0, dp(context, 6), 0);
 
             Button qqBtn = createButton("联系客服", "#1890FF", 8);
-            qqBtn.setOnClickListener(new QQClickListener(this));
-            buttonRow.addView(qqBtn, btnParams);
+            qqBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        Intent i = new Intent(Intent.ACTION_VIEW);
+                        i.setData(Uri.parse(getContactUrl()));
+                        context.startActivity(i);
+                    } catch (Exception e) {
+                        Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+            btns.addView(qqBtn, bp);
 
-            Button activateBtn = createButton("手动验证", "#52C41A", 8);
-            activateBtn.setOnClickListener(new ActivateClickListener(this));
-            buttonRow.addView(activateBtn, btnParams);
+            Button actBtn = createButton("手动验证", "#52C41A", 8);
+            actBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (statusText != null) {
+                        statusText.setText("正在验证...");
+                        statusText.setTextColor(Color.parseColor("#1890FF"));
+                    }
+                    new ActivationTask().execute();
+                }
+            });
+            btns.addView(actBtn, bp);
 
             Button exitBtn = createButton("退出", "#FF4D4F", 8);
-            exitBtn.setOnClickListener(new ExitClickListener(this));
-            buttonRow.addView(exitBtn, btnParams);
-
-            mainLayout.addView(buttonRow);
-            dialog.setContentView(mainLayout);
-        }
-
-        private void configureDialogWindow() {
-            Window window = dialog.getWindow();
-            if (window != null) {
-                DisplayMetrics metrics = new DisplayMetrics();
-                context.getWindowManager().getDefaultDisplay().getMetrics(metrics);
-
-                WindowManager.LayoutParams params = window.getAttributes();
-                params.width = (int) (metrics.widthPixels * 0.9);
-                params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                params.y = -dpToPx(15);
-                window.setAttributes(params);
-                window.setBackgroundDrawableResource(android.R.color.transparent);
-            }
-        }
-
-        private static class CopyClickListener implements View.OnClickListener {
-            private final ActivationDialog dialog;
-
-            CopyClickListener(ActivationDialog dialog) {
-                this.dialog = dialog;
-            }
-
-            @Override
-            public void onClick(View v) {
-                ClipboardManager clipboard = (ClipboardManager) dialog.getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-                ClipData clip = ClipData.newPlainText("device_code", dialog.getDeviceId());
-                clipboard.setPrimaryClip(clip);
-                Toast.makeText(dialog.getContext(), "设备ID已复制", Toast.LENGTH_SHORT).show();
-            }
-        }
-
-        private static class QQClickListener implements View.OnClickListener {
-            private final ActivationDialog dialog;
-
-            QQClickListener(ActivationDialog dialog) {
-                this.dialog = dialog;
-            }
-
-            @Override
-            public void onClick(View v) {
-                try {
-                    Intent intent = new Intent(Intent.ACTION_VIEW);
-                    intent.setData(Uri.parse(getContactUrl()));
-                    dialog.getContext().startActivity(intent);
-                } catch (Exception e) {
-                    Toast.makeText(dialog.getContext(), "无法打开链接", Toast.LENGTH_SHORT).show();
+            exitBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    context.finishAffinity();
+                    System.exit(0);
                 }
-            }
+            });
+            btns.addView(exitBtn, bp);
+
+            main.addView(btns);
+            dialog.setContentView(main);
         }
 
-        private static class ActivateClickListener implements View.OnClickListener {
-            private final ActivationDialog dialog;
-
-            ActivateClickListener(ActivationDialog dialog) {
-                this.dialog = dialog;
-            }
-
+        private class ActivationTask extends AsyncTask<Void, Void, Boolean> {
             @Override
-            public void onClick(View v) {
-                if (dialog.statusText != null) {
-                    dialog.statusText.setText("正在验证...");
-                    dialog.statusText.setTextColor(Color.parseColor("#1890FF"));
-                }
-                new ActivationTask(dialog).execute();
-            }
-        }
-
-        private static class ExitClickListener implements View.OnClickListener {
-            private final ActivationDialog dialog;
-
-            ExitClickListener(ActivationDialog dialog) {
-                this.dialog = dialog;
-            }
-
-            @Override
-            public void onClick(View v) {
-                dialog.getContext().finishAffinity();
-                System.exit(0);
-            }
-        }
-
-        private static class ActivationTask extends AsyncTask<Void, Void, Boolean> {
-            private final ActivationDialog activationDialog;
-
-            ActivationTask(ActivationDialog dialog) {
-                this.activationDialog = dialog;
-            }
-
-            @Override
-            protected Boolean doInBackground(Void... voids) {
-                HttpURLConnection conn = null;
-                BufferedReader reader = null;
-                String fullExpiry = null;
+            protected Boolean doInBackground(Void... v) {
+                String exp;
                 try {
-                    URL url = new URL(getValidationUrl());
-                    conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(8000);
-                    conn.setReadTimeout(8000);
-
-                    reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                    String line;
-                    Pattern pattern = Pattern.compile(activationDialog.deviceId + "-(\\d{12})");
-                    while ((line = reader.readLine()) != null) {
-                        Matcher matcher = pattern.matcher(line);
-                        if (matcher.find()) {
-                            String expiryPart = matcher.group(1);
-                            fullExpiry = activationDialog.deviceId + "-" + expiryPart;
-                            break;
-                        }
-                    }
-                } catch (IOException e) {
-                    Log.e("Activation", "Network Error", e);
-                } finally {
+                    exp = nativeFetchValidation(deviceId);
+                } catch (Exception e) { return false; }
+                if (exp != null) {
                     try {
-                        if (reader != null) reader.close();
-                        if (conn != null) conn.disconnect();
-                    } catch (IOException e) {
-                        Log.e("Activation", "Close Error", e);
-                    }
-                }
-
-                if (fullExpiry != null) {
-                    long beijingTime = fetchBeijingTime();
-                    if (beijingTime > 0 && checkExpiryWithBeijingTime(fullExpiry, beijingTime)) {
-                        activationDialog.prefs.edit().putString(getKeyExpiryDate(), fullExpiry).apply();
-                        new CheckExpiryTask(activationDialog.context, activationDialog.prefs, activationDialog.deviceId).execute();
-                        return true;
-                    }
+                        if (nativeFetchBeijingTime()) {
+                            if (nativeCheckExpiry(exp, cachedBeijingTime)) {
+                                prefs.edit().putString("expiry_date", exp).apply();
+                                new CheckExpiryTask(context, prefs, deviceId).execute();
+                                return true;
+                            }
+                        }
+                    } catch (Exception e) {}
                 }
                 return false;
             }
 
             @Override
-            protected void onPostExecute(Boolean success) {
-                if (success) {
-                    activationDialog.stopAutoCheck();
-                    if (activationDialog.statusText != null) {
-                        activationDialog.statusText.setText("验证通过，激活成功");
-                        activationDialog.statusText.setTextColor(Color.parseColor("#52C41A"));
+            protected void onPostExecute(Boolean ok) {
+                if (ok) {
+                    stopAutoCheck();
+                    if (statusText != null) {
+                        statusText.setText("验证通过，激活成功");
+                        statusText.setTextColor(Color.parseColor("#52C41A"));
                     }
                     new Handler().postDelayed(new Runnable() {
                         @Override
-                        public void run() {
-                            activationDialog.dismiss();
-                        }
+                        public void run() { dismiss(); }
                     }, 800);
                 } else {
-                    if (activationDialog.statusText != null) {
-                        activationDialog.statusText.setText("激活失败，请QQ联系管理员");
-                        activationDialog.statusText.setTextColor(Color.parseColor("#FF4D4F"));
+                    if (statusText != null) {
+                        statusText.setText("激活失败，请QQ联系管理员");
+                        statusText.setTextColor(Color.parseColor("#FF4D4F"));
                     }
                 }
             }
